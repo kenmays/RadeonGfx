@@ -60,7 +60,7 @@ RadeonDevice::~RadeonDevice()
 	// Init() can fail before the interrupt ring is allocated (including the
 	// early rejection of unsupported ASICs). Do not dereference an empty
 	// ExternalPtr while unwinding partial initialization.
-	if (fIntRing.IsSet()) {
+	if (fIntRing.Get() != NULL) {
 		fIntRing.Switch()->Disable();
 		fIntRing.Delete();
 	}
