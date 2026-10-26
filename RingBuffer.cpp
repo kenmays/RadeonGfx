@@ -20,7 +20,7 @@ void RadeonRingBuffer::WriteState()
 // #pragma mark RadeonRingBuffer
 
 RadeonRingBuffer::RadeonRingBuffer(RingType type):
-	fType(type), fFenceGpuAdr(0), fFenceAdr(NULL)
+	fType(type), fFenceGpuAdr(0), fRptrGpuAdr(0), fRptrAdr(NULL), fFenceAdr(NULL)
 {}
 
 RadeonRingBuffer::~RadeonRingBuffer()
