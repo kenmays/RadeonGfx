@@ -1471,6 +1471,13 @@ static void gfx_v6_0_constants_init(struct amdgpu_device *adev)
 
 status_t InitGpu(amdgpu_device *dev)
 {
+	// Defense in depth: this function initializes GFX6 constants below. Bonaire
+	// is GFX7 and must not be routed through gfx_v6_0_constants_init().
+	if (gDevice.SharedInfo()->chipsetID == RADEON_BONAIRE) {
+		printf("RadeonGfx: refusing to initialize Bonaire through the GFX6 path\\n");
+		return B_NOT_SUPPORTED;
+	}
+
 	switch (gDevice.SharedInfo()->chipsetID) {
 		case RADEON_CAPEVERDE:
 			dev->asic_type = CHIP_VERDE;
