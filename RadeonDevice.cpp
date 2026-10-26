@@ -114,17 +114,17 @@ status_t RadeonDevice::Init(int fd)
 	}
 	fSharedArea.SetTo(clone_area("radeon hd shared info", (void**)&fSharedInfo, B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA, data.shared_info_area));
 	if (!fSharedArea.IsSet()) return fSharedArea.Get();
-	fRegsArea.SetTo(clone_area("radeon hd regs", (void**)&fRegs, B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA, fSharedInfo->registers_area));
-	if (!fRegsArea.IsSet()) return fRegsArea.Get();
 
 	// Bonaire is GCN 2 / GFX7. The initialization below is currently GFX6-only:
-	// it loads SI firmware and uses GFX6/GMC6 register programming. Do not let a
-	// PCI-ID match reach this path until the GFX7/GMC7/DCE 8.2 implementation is
-	// complete; otherwise initialization can abort or program incompatible regs.
+	// it loads SI firmware and uses GFX6/GMC6 register programming. Reject it
+	// before mapping the GPU register area, loading AtomBIOS, or writing registers.
 	if (fSharedInfo->chipsetID == RADEON_BONAIRE) {
 		printf("RadeonGfx: Bonaire (GFX7) is detected but not supported by this initialization path\n");
 		return B_NOT_SUPPORTED;
 	}
+
+	fRegsArea.SetTo(clone_area("radeon hd regs", (void**)&fRegs, B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA, fSharedInfo->registers_area));
+	if (!fRegsArea.IsSet()) return fRegsArea.Get();
 
 	printf("fSharedInfo->frame_buffer_size: %#" B_PRIx32 "\n", fSharedInfo->frame_buffer_size);
 
