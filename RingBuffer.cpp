@@ -25,8 +25,14 @@ RadeonRingBuffer::RadeonRingBuffer(RingType type):
 
 RadeonRingBuffer::~RadeonRingBuffer()
 {
-	if (fRptrGpuAdr != 0) {gDevice.MemMgr().Switch()->FreeWriteback(fFenceGpuAdr); fRptrGpuAdr = 0;}
-	if (fFenceGpuAdr != 0) {gDevice.MemMgr().Switch()->FreeWriteback(fFenceGpuAdr); fFenceGpuAdr = 0;}
+	if (fRptrGpuAdr != 0) {
+		gDevice.MemMgr().Switch()->FreeWriteback(fRptrGpuAdr);
+		fRptrGpuAdr = 0;
+	}
+	if (fFenceGpuAdr != 0) {
+		gDevice.MemMgr().Switch()->FreeWriteback(fFenceGpuAdr);
+		fFenceGpuAdr = 0;
+	}
 }
 
 status_t RadeonRingBuffer::Init(uint32 size)
