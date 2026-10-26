@@ -117,7 +117,7 @@ status_t RadeonDevice::Init(int fd)
 	// PCI-ID match reach this path until the GFX7/GMC7/DCE 8.2 implementation is
 	// complete; otherwise initialization can abort or program incompatible regs.
 	if (fSharedInfo->chipsetID == RADEON_BONAIRE) {
-		printf("RadeonGfx: Bonaire (GFX7) is detected but not supported by this initialization path\\n");
+		printf("RadeonGfx: Bonaire (GFX7) is detected but not supported by this initialization path\n");
 		return B_NOT_SUPPORTED;
 	}
 
