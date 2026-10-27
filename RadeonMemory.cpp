@@ -182,6 +182,13 @@ status_t AddressSpace::Map(BReference<BufferObject> buffer, uint64 mapAdr, uint6
 		return B_BAD_VALUE;
 
 	const uint64 mapEnd = mapAdr + size;
+	// LookupPte() currently implements a two-level page table only: 4096 PDEs
+	// times 512 PTEs times 4 KiB. Reject addresses outside that implemented
+	// 8 GiB GPU virtual-address window rather than walking an unrepresentable VA.
+	const uint64 gpuVaLimit = (uint64)pageDirLen * pageTableLen * B_PAGE_SIZE;
+	if (mapEnd > gpuVaLimit)
+		return B_BAD_VALUE;
+
 	auto next = fMappings.lower_bound(mapAdr);
 	if (next != fMappings.end() && next->first < mapEnd)
 		return B_BUSY;
