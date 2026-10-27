@@ -344,10 +344,14 @@ status_t MemoryManager::Init()
 	CheckRet(gDevice.Displays().Switch()->RegisterFramebuffers());
 
 	MappedBuffer dummyPage(Alloc(boDomainVramMappable, B_PAGE_SIZE));
+	if (!dummyPage.buf.IsSet() || dummyPage.adr == NULL)
+		return B_NO_MEMORY;
 	memset(dummyPage.adr, 0, dummyPage.buf->size);
 	fDummyPage = dummyPage.buf;
 
 	MappedBuffer vramScratch(Alloc(boDomainVramMappable, B_PAGE_SIZE));
+	if (!vramScratch.buf.IsSet() || vramScratch.adr == NULL)
+		return B_NO_MEMORY;
 	memset(vramScratch.adr, 0, vramScratch.buf->size);
 	fVramScratch = vramScratch.buf;
 
@@ -358,9 +362,16 @@ status_t MemoryManager::Init()
 
 BReference<BufferObject> MemoryManager::Alloc(MemoryDomain domain, uint64 size, uint64 alignment, uint32 flags, area_id area, uint64 offset)
 {
-	(void)alignment;
 	(void)flags;
-	size = (size + B_PAGE_SIZE - 1) / B_PAGE_SIZE * B_PAGE_SIZE;
+	if (domain < boDomainVram || domain > boDomainGtt || size == 0
+		|| alignment == 0 || (alignment & (alignment - 1)) != 0
+		|| size > UINT64_MAX - (B_PAGE_SIZE - 1))
+		return NULL;
+	// The allocator currently guarantees page alignment only. Do not silently
+	// promise a stronger alignment that it cannot provide.
+	if (alignment > B_PAGE_SIZE)
+		return NULL;
+	size = ((size + B_PAGE_SIZE - 1) / B_PAGE_SIZE) * B_PAGE_SIZE;
 	ExternalAllocator& pool = fDomainPools[domain];
 	//printf("  pool: %p\n", &pool);
 	uint64 gpuPhysAdr;
@@ -394,9 +405,12 @@ BReference<BufferObject> MemoryManager::Alloc(MemoryDomain domain, uint64 size, 
 
 BReference<BufferObject> MemoryManager::AllocAt(uint64 gpuAdr, uint64 size, uint64 alignment, uint32 flags)
 {
-	(void)alignment;
 	(void)flags;
-	size = (size + B_PAGE_SIZE - 1) / B_PAGE_SIZE * B_PAGE_SIZE;
+	if (size == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0
+		|| alignment > B_PAGE_SIZE || size > UINT64_MAX - (B_PAGE_SIZE - 1)
+		|| (gpuAdr & (B_PAGE_SIZE - 1)) != 0)
+		return NULL;
+	size = ((size + B_PAGE_SIZE - 1) / B_PAGE_SIZE) * B_PAGE_SIZE;
 	MemoryDomain domain = boDomainVramMappable;
 	ExternalAllocator& pool = fDomainPools[domain];
 	if (!pool.AllocAt(gpuAdr, size)) return NULL;
@@ -410,16 +424,26 @@ BReference<BufferObject> MemoryManager::AllocAt(uint64 gpuAdr, uint64 size, uint
 
 status_t MemoryManager::CpuMap(void*& ptr, BReference<BufferObject> buffer, uint64 offset, uint64 size)
 {
-	if (!buffer.IsSet()) return B_BAD_VALUE;
-	if (!(offset + size <= buffer->size)) return B_BAD_VALUE;
+	if (!buffer.IsSet() || size == 0) return B_BAD_VALUE;
+	if (offset > buffer->size || size > buffer->size - offset)
+		return B_BAD_VALUE;
 	switch (buffer->domain) {
 		case boDomainVramMappable: {
+			if (buffer->gpuPhysAdr < fVramRange.beg
+				|| buffer->gpuPhysAdr - fVramRange.beg > fVramRange.size
+				|| buffer->size > fVramRange.size - (buffer->gpuPhysAdr - fVramRange.beg)
+				|| gDevice.SharedInfo() == NULL
+				|| gDevice.SharedInfo()->frame_buffer == NULL)
+				return B_BAD_ADDRESS;
 			ptr = gDevice.SharedInfo()->frame_buffer + (buffer->gpuPhysAdr - fVramRange.beg) + offset;
 			return B_OK;
 		}
 		case boDomainGtt: {
 			area_info areaInfo;
 			CheckRet(get_area_info(buffer->area.Get(), &areaInfo));
+			if (buffer->offset > areaInfo.size || offset > areaInfo.size - buffer->offset
+				|| size > areaInfo.size - buffer->offset - offset)
+				return B_BAD_VALUE;
 			ptr = (uint8*)areaInfo.address + buffer->offset + offset;
 			return B_OK;
 		}
@@ -477,6 +501,8 @@ status_t MemoryManager::InitGart()
 	uint32 radeon_vm_block_size = 9;
 
 	fGartPageTable.SetTo(Alloc(boDomainVramMappable, fGttRange.size / B_PAGE_SIZE * sizeof(uint64)));
+	if (!fGartPageTable.buf.IsSet() || fGartPageTable.adr == NULL)
+		return B_NO_MEMORY;
 	memset(fGartPageTable.adr, 0, fGartPageTable.buf->size);
 
 	/* Setup TLB control */
@@ -574,6 +600,14 @@ status_t MemoryManager::InitGart()
 	fGartEnabled = true;
 
 	fWritebackBuf.SetTo(Alloc(boDomainGtt, 4096));
+	if (!fWritebackBuf.buf.IsSet() || fWritebackBuf.adr == NULL) {
+		// Keep the driver in a fail-closed state if writeback cannot be
+		// established; context 0 must not remain enabled without full setup.
+		WriteReg4AmdGpu(mmVM_CONTEXT0_CNTL, 0);
+		WriteReg4AmdGpu(mmVM_INVALIDATE_REQUEST, 1);
+		fGartEnabled = false;
+		return B_NO_MEMORY;
+	}
 	fWritebackPool.Register(fWritebackBuf.buf->gpuPhysAdr, fWritebackBuf.buf->size);
 
 	return B_OK;
