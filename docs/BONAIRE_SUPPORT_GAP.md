@@ -46,6 +46,20 @@ Before increasing coverage:
 
 The existing 8 GiB guard is a defensive bound for the current software implementation. It must not be removed until the replacement geometry is implemented and tested.
 
+## Immediate issues visible in the current memory code
+
+These findings are source inspection only; they have not been reproduced by a Haiku build or hardware test.
+
+- `MemoryManager::InitGart()` allocates `fGartPageTable` and immediately dereferences `fGartPageTable.adr` for `memset` without first checking that allocation succeeded. It later dereferences `fWritebackBuf.buf` after `Alloc(boDomainGtt, 4096)` without checking that allocation or `GartMap` succeeded. Convert these into checked failures with correct cleanup before adding another ASIC path.
+- `MemoryManager::Init()` also assumes the dummy and scratch allocations succeed before calling `memset`; it should check each allocation and CPU mapping before dereferencing pointers.
+- `MemoryManager::Alloc()` and `AllocAt()` round sizes using `size + B_PAGE_SIZE - 1` without an overflow check. Reject overflow before rounding, and validate zero sizes and alignment constraints.
+- `MemoryManager::CpuMap()` tests `offset + size <= buffer->size`; use a subtraction-based bounds check after verifying `offset <= buffer->size` to avoid addition overflow.
+- `AddressSpace::Unmap()` clears PTEs incrementally and returns immediately if a later `UnmapInt()` fails. That can leave a partially unmapped range while retaining the mapping record. Preflight all PTEs (and validate the complete range) before changing any entries, or implement a defined recovery/rollback strategy.
+- The VRAM mapping path marks 64 KiB fragments based on virtual-address boundaries. Verify that the physical address, virtual address, and PTE fragment requirements are all satisfied and that allocator alignment is honored; `Alloc()` currently discards its `alignment` argument.
+- `InitGart()` programs VM registers and sets `fGartEnabled` before allocating the writeback buffer. Initialization should not report success or leave the GART enabled if a required later allocation fails; use explicit staged initialization and unwind.
+
+Resolve and test these general memory/lifecycle hazards before treating the memory manager as a safe foundation for Bonaire. They are not, by themselves, proof of a Bonaire-specific hardware failure.
+
 ## Staged acceptance criteria
 
 1. **Fail-closed baseline:** unsupported Bonaire initialization returns an error before any GPU register writes; destructor and failure cleanup are safe.
