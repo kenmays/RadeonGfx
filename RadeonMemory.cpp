@@ -202,6 +202,14 @@ status_t AddressSpace::Map(BReference<BufferObject> buffer, uint64 mapAdr, uint6
 	if (!memMgr)
 		return B_NO_INIT;
 
+	// Reject stale/orphan PTEs too: the mapping index alone is not enough
+	// to prove that the hardware page-table range is empty.
+	for (uint64 ofs = 0; ofs < size; ofs += B_PAGE_SIZE) {
+		Pte* existing = LookupPte(mapAdr + ofs, false);
+		if (existing != NULL && (existing->flags & R600_PTE_VALID))
+			return B_BUSY;
+	}
+
 	uint32 flags = R600_PTE_READABLE | R600_PTE_WRITEABLE;
 	status_t status = B_OK;
 	uint64 physAdr = buffer->gpuPhysAdr + offset;
@@ -287,6 +295,13 @@ status_t AddressSpace::Unmap(BReference<BufferObject> buffer, uint64 mapAdr, uin
 		|| RoundUp<uint64>(size, B_PAGE_SIZE) != mapping.size)
 		return B_BAD_VALUE;
 
+	// Preflight the complete range before clearing any PTE. This avoids
+	// returning with a half-unmapped range and a still-live mapping record.
+	for (uint64 ofs = 0; ofs < mapping.size; ofs += B_PAGE_SIZE) {
+		Pte* pte = LookupPte(mapAdr + ofs, false);
+		if (pte == NULL || !(pte->flags & R600_PTE_VALID))
+			return B_BAD_ADDRESS;
+	}
 	for (uint64 ofs = 0; ofs < mapping.size; ofs += B_PAGE_SIZE) {
 		status_t status = UnmapInt(mapAdr + ofs);
 		if (status != B_OK)
