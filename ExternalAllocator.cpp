@@ -38,6 +38,8 @@ void ExternalAllocator::Register(uint64_t ptr, uint64_t size)
 
 bool ExternalAllocator::Alloc(uint64_t &ptr, uint64_t size)
 {
+	if (size == 0)
+		return false;
 	Block *block = fSizeMap.FindClosest(size, false);
 	if (block == NULL)
 		return false;
@@ -58,6 +60,8 @@ bool ExternalAllocator::Alloc(uint64_t &ptr, uint64_t size)
 
 bool ExternalAllocator::AllocAligned(uint64_t &ptr, uint64_t size, uint64_t align)
 {
+	if (size == 0 || align == 0 || size > UINT64_MAX - (align - 1))
+		return false;
 	Block *block = fSizeMap.FindClosest(size + (align - 1), false);
 	if (block == NULL)
 		return false;
@@ -69,9 +73,13 @@ bool ExternalAllocator::AllocAligned(uint64_t &ptr, uint64_t size, uint64_t alig
 
 bool ExternalAllocator::AllocAt(uint64_t ptr, uint64_t size)
 {
+	if (size == 0 || ptr > UINT64_MAX - size)
+		return false;
 	Block *block = fAdrMap.FindClosest(ptr, true);
 
-	if (block == NULL || block->fAllocated || !(ptr >= block->fAdr && ptr + size <= block->fAdr + block->fSize))
+	if (block == NULL || block->fAllocated || ptr < block->fAdr
+		|| ptr - block->fAdr > block->fSize
+		|| size > block->fSize - (ptr - block->fAdr))
 		return false;
 
 	if (block->fAdr < ptr) {
