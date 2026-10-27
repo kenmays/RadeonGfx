@@ -196,7 +196,7 @@ status_t AddressSpace::Map(BReference<BufferObject> buffer, uint64 mapAdr, uint6
 	uint32 flags = R600_PTE_READABLE | R600_PTE_WRITEABLE;
 	status_t status = B_OK;
 	uint64 physAdr = buffer->gpuPhysAdr + offset;
-	if (physAdr < buffer->gpuPhysAdr)
+	if (physAdr < buffer->gpuPhysAdr || physAdr > UINT64_MAX - size)
 		return B_BAD_VALUE;
 
 	if (buffer->domain == boDomainGtt) {
@@ -207,8 +207,10 @@ status_t AddressSpace::Map(BReference<BufferObject> buffer, uint64 mapAdr, uint6
 		for (uint64 ofs = 0; ofs < size; ofs += B_PAGE_SIZE) {
 			const uint64 gttAdr = physAdr + ofs;
 			if (gttAdr < memMgr->fGttRange.beg
-				|| gttAdr - memMgr->fGttRange.beg >= memMgr->fGttRange.size)
-				return B_BAD_VALUE;
+				|| gttAdr - memMgr->fGttRange.beg >= memMgr->fGttRange.size) {
+				status = B_BAD_VALUE;
+				break;
+			}
 
 			const uint64 gttIndex = (gttAdr - memMgr->fGttRange.beg) / B_PAGE_SIZE;
 			const Pte gttPte = ((Pte*)memMgr->fGartPageTable.adr)[gttIndex];
