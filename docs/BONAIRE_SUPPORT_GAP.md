@@ -26,7 +26,7 @@ Linux's GFX7 code declares Bonaire-specific `bonaire_pfp.bin`, `bonaire_me.bin`,
 - GMC/MC: `bonaire_mc.bin` (see [gmc_v7_0.c](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/gmc_v7_0.c)).
 - SDMA: `bonaire_sdma.bin` and `bonaire_sdma1.bin` (see [cik_sdma.c](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/cik_sdma.c)).
 - VCE: `bonaire_vce.bin` where VCE support is implemented (see [amdgpu_vce.c](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/amdgpu_vce.c)).
-- UVD: confirm the precise firmware name, format and version requirements in the selected CIK UVD implementation before packaging it.
+- UVD: `bonaire_uvd.bin` (see [amdgpu_uvd.c](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/amdgpu_uvd.c)); validate the firmware header/version and loader requirements before packaging it.
 
 The firmware directory name differs between Linux driver generations: current amdgpu uses `amdgpu/`; the legacy radeon driver used `radeon/`. Do not rename files or mix generations without confirming expected firmware headers, versions and loader behavior. Obtain and redistribute firmware only under its applicable licensing and distribution terms; do not fabricate or modify firmware blobs.
 
