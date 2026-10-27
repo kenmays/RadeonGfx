@@ -662,6 +662,12 @@ status_t MemoryManager::GartMap(BReference<BufferObject> buffer)
 
 	const uint64 firstIndex = (buffer->gpuPhysAdr - fGttRange.beg) / B_PAGE_SIZE;
 	const uint64 pageCount = buffer->size / B_PAGE_SIZE;
+	// The GTT allocator should prevent overlap, but verify the entire PTE
+	// range before writing so stale entries cannot be silently overwritten.
+	for (uint64 page = 0; page < pageCount; page++) {
+		if (pageTableVirtAdr[firstIndex + page].flags & R600_PTE_VALID)
+			return B_BUSY;
+	}
 	for (uint64 page = 0; page < pageCount; page++) {
 		uint64 cpuPhysAdr = 0;
 		status_t status = gPoke.GetPhysicalAddress(cpuPhysAdr,
@@ -693,8 +699,15 @@ status_t MemoryManager::GartUnmap(BufferObject *buffer)
 		return B_BAD_VALUE;
 	const uint64 firstIndex = (buffer->gpuPhysAdr - fGttRange.beg) / B_PAGE_SIZE;
 	const uint64 pageCount = buffer->size / B_PAGE_SIZE;
+	Pte* pageTable = (Pte*)fGartPageTable.adr;
+	// Preflight before mutation: never leave a half-cleared GART mapping if
+	// the page table is already inconsistent.
+	for (uint64 page = 0; page < pageCount; page++) {
+		if (!(pageTable[firstIndex + page].flags & R600_PTE_VALID))
+			return B_BAD_ADDRESS;
+	}
 	for (uint64 page = 0; page < pageCount; page++)
-		((Pte*)fGartPageTable.adr)[firstIndex + page] = Pte{.val = 0};
+		pageTable[firstIndex + page] = Pte{.val = 0};
 	GartFlushTlb();
 	return B_OK;
 }
