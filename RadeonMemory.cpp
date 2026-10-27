@@ -155,10 +155,19 @@ static void WritePteFlags(uint32 flags) {
 void AddressSpace::DumpPageTable()
 {
 	printf("page table\n");
+	if (!fPageDirBuf.buf.IsSet() || fPageDirBuf.adr == NULL) {
+		printf("  unavailable: page directory is not mapped\n");
+		return;
+	}
 	for (uint64 pdeIdx = 0; pdeIdx < pageDirLen; pdeIdx ++) {
 		Pte *pde = (Pte*)fPageDirBuf.adr + pdeIdx;
 		Pte pdeVal = *pde;
 		if (pdeVal.flags & R600_PTE_VALID) {
+			if (!fPageTableBufs[pdeIdx].buf.IsSet() || fPageTableBufs[pdeIdx].adr == NULL) {
+				printf("  %#" B_PRIx64 ": valid PDE has no mapped page table\n",
+					pdeIdx * pageTableLen * B_PAGE_SIZE);
+				continue;
+			}
 			printf("  %#" B_PRIx64 ": %#" B_PRIx64 ", %#" B_PRIx64 ", ", pdeIdx * pageTableLen * B_PAGE_SIZE, pdeVal.ppn * B_PAGE_SIZE, fPageTableBufs[pdeIdx].buf->gpuPhysAdr);
 			WritePteFlags(pdeVal.flags); printf("\n");
 
