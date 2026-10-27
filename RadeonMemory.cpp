@@ -87,9 +87,12 @@ Pte *AddressSpace::LookupPte(uint64 virtAdr, bool alloc)
 	Pte pdeVal = *pde;
 	if (!(pdeVal.flags & R600_PTE_VALID)) {
 		if (!alloc) return NULL;
-		fPageTableBufs[pdeIdx].SetTo(memMgr->Alloc(boDomainVramMappable, pageTableLen*sizeof(Pte)));
-		if (!fPageTableBufs[pdeIdx].buf.IsSet()) {
-			printf("[!] AddressSpace::LookupPte: out of mappable VRAM memory\n");
+		status_t status = fPageTableBufs[pdeIdx].SetTo(
+			memMgr->Alloc(boDomainVramMappable, pageTableLen * sizeof(Pte)));
+		if (status != B_OK || !fPageTableBufs[pdeIdx].buf.IsSet()
+			|| fPageTableBufs[pdeIdx].adr == NULL) {
+			printf("[!] AddressSpace::LookupPte: unable to map page table memory (%" B_PRIi32 ")\n",
+				status);
 			return NULL;
 		}
 		memset(fPageTableBufs[pdeIdx].adr, 0, fPageTableBufs[pdeIdx].buf->size);
