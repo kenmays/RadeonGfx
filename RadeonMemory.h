@@ -108,7 +108,7 @@ private:
 public:
 	AddressSpace();
 	virtual ~AddressSpace();
-	uint64 PageDir() {return fPageDirBuf.buf->gpuPhysAdr;}
+	uint64 PageDir() { return fPageDirBuf.buf.IsSet() ? fPageDirBuf.buf->gpuPhysAdr : 0; }
 	void DumpPageTable();
 
 	BReference<BufferObject> Lookup(uint64 mapAdr, uint64 &offset);
