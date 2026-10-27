@@ -723,16 +723,14 @@ status_t MemoryManager::GartUnmap(BufferObject *buffer)
 	const uint64 firstIndex = (buffer->gpuPhysAdr - fGttRange.beg) / B_PAGE_SIZE;
 	const uint64 pageCount = buffer->size / B_PAGE_SIZE;
 	Pte* pageTable = (Pte*)fGartPageTable.adr;
-	// Preflight before mutation: never leave a half-cleared GART mapping if
-	// the page table is already inconsistent.
+	bool inconsistent = false;
 	for (uint64 page = 0; page < pageCount; page++) {
 		if (!(pageTable[firstIndex + page].flags & R600_PTE_VALID))
-			return B_BAD_ADDRESS;
-	}
-	for (uint64 page = 0; page < pageCount; page++)
+			inconsistent = true;
 		pageTable[firstIndex + page] = Pte{.val = 0};
+	}
 	GartFlushTlb();
-	return B_OK;
+	return inconsistent ? B_BAD_ADDRESS : B_OK;
 }
 
 void MemoryManager::GartFlushTlb()
