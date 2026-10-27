@@ -30,6 +30,19 @@ ExternalAllocator::~ExternalAllocator()
 
 void ExternalAllocator::Register(uint64_t ptr, uint64_t size)
 {
+	if (size == 0 || ptr > UINT64_MAX - size
+		|| fTotalSize > UINT64_MAX - size)
+		return;
+
+	Block *previous = fAdrMap.FindClosest(ptr, true);
+	if (previous != NULL
+		&& (previous->fAdr > UINT64_MAX - previous->fSize
+			|| previous->fAdr + previous->fSize > ptr))
+		return;
+	Block *next = previous != NULL ? fAdrMap.Next(previous) : fAdrMap.LeftMost();
+	if (next != NULL && ptr + size > next->fAdr)
+		return;
+
 	Block *block = new Block(ptr, size);
 	fAdrMap.Insert(block);
 	fSizeMap.Insert(block);
@@ -66,6 +79,8 @@ bool ExternalAllocator::AllocAligned(uint64_t &ptr, uint64_t size, uint64_t alig
 	if (block == NULL)
 		return false;
 
+	if (block->fAdr > UINT64_MAX - (align - 1))
+		return false;
 	uint64_t retPtr = RoundUp(block->fAdr, align);
 	ptr = retPtr;
 	return AllocAt(retPtr, size);
