@@ -35,9 +35,17 @@ BufferObject::~BufferObject()
 
 status_t MappedBuffer::SetTo(BReference<BufferObject> buffer)
 {
+	adr = NULL;
 	buf = buffer;
-	if (!buf.IsSet()) {adr = NULL; return B_OK;}
-	return gDevice.MemMgr().Switch()->CpuMap(adr, buf, 0, buf->size);
+	if (!buf.IsSet())
+		return B_OK;
+	auto memMgr = gDevice.MemMgr().Switch();
+	if (memMgr == NULL)
+		return B_NO_INIT;
+	status_t status = memMgr->CpuMap(adr, buf, 0, buf->size);
+	if (status != B_OK)
+		adr = NULL;
+	return status;
 }
 
 
@@ -630,19 +638,41 @@ status_t MemoryManager::InitGart()
 
 status_t MemoryManager::GartMap(BReference<BufferObject> buffer)
 {
-	// printf("GartMap()\n");
-	uint8 *cpuVirtAdr;
+	if (!buffer.IsSet() || buffer->domain != boDomainGtt || buffer->size == 0
+		|| fGartPageTable.adr == NULL || !fGartPageTable.buf.IsSet())
+		return B_NO_INIT;
+	if (buffer->gpuPhysAdr < fGttRange.beg
+		|| buffer->gpuPhysAdr - fGttRange.beg > fGttRange.size
+		|| buffer->size > fGttRange.size - (buffer->gpuPhysAdr - fGttRange.beg)
+		|| (buffer->gpuPhysAdr & (B_PAGE_SIZE - 1)) != 0
+		|| (buffer->size & (B_PAGE_SIZE - 1)) != 0)
+		return B_BAD_VALUE;
+
+	uint8 *cpuVirtAdr = NULL;
 	Pte *pageTableVirtAdr = (Pte*)fGartPageTable.adr;
-	CheckRet(gDevice.MemMgr().Switch()->CpuMap(*(void**)&cpuVirtAdr, buffer, 0, buffer->size));
-	for (uint64 offset = 0; offset < buffer->size; offset += B_PAGE_SIZE) {
-		uint64 cpuPhysAdr;
-		CheckRet(gPoke.GetPhysicalAddress(cpuPhysAdr, cpuVirtAdr + offset, B_PAGE_SIZE));
-		Pte pte{
+	if (pageTableVirtAdr == NULL)
+		return B_NO_INIT;
+	auto memMgr = gDevice.MemMgr().Switch();
+	if (memMgr == NULL)
+		return B_NO_INIT;
+	CheckRet(memMgr->CpuMap(*(void**)&cpuVirtAdr, buffer, 0, buffer->size));
+
+	const uint64 firstIndex = (buffer->gpuPhysAdr - fGttRange.beg) / B_PAGE_SIZE;
+	const uint64 pageCount = buffer->size / B_PAGE_SIZE;
+	for (uint64 page = 0; page < pageCount; page++) {
+		uint64 cpuPhysAdr = 0;
+		status_t status = gPoke.GetPhysicalAddress(cpuPhysAdr,
+			cpuVirtAdr + page * B_PAGE_SIZE, B_PAGE_SIZE);
+		if (status != B_OK) {
+			for (uint64 rollback = 0; rollback < page; rollback++)
+				pageTableVirtAdr[firstIndex + rollback] = Pte{.val = 0};
+			GartFlushTlb();
+			return status;
+		}
+		pageTableVirtAdr[firstIndex + page] = Pte{
 			.flags = R600_PTE_VALID | R600_PTE_SYSTEM | R600_PTE_READABLE | R600_PTE_WRITEABLE | R600_PTE_SNOOPED,
 			.ppn = cpuPhysAdr / B_PAGE_SIZE
 		};
-		pageTableVirtAdr[(buffer->gpuPhysAdr - fGttRange.beg + offset) / B_PAGE_SIZE] = pte;
-		// printf("  %#" B_PRIx64 ": %#" B_PRIx64 "\n", buffer->gpuPhysAdr - fGttRange.beg + offset, cpuPhysAdr);
 	}
 	GartFlushTlb();
 	return B_OK;
@@ -650,10 +680,18 @@ status_t MemoryManager::GartMap(BReference<BufferObject> buffer)
 
 status_t MemoryManager::GartUnmap(BufferObject *buffer)
 {
-	Pte *pageTableVirtAdr = (Pte*)fGartPageTable.adr;
-	for (uint64 offset = 0; offset < buffer->size; offset += B_PAGE_SIZE) {
-		pageTableVirtAdr[(buffer->gpuPhysAdr - fGttRange.beg + offset) / B_PAGE_SIZE] = Pte{.val = 0};
-	}
+	if (buffer == NULL || fGartPageTable.adr == NULL || !fGartPageTable.buf.IsSet())
+		return B_NO_INIT;
+	if (buffer->gpuPhysAdr < fGttRange.beg
+		|| buffer->gpuPhysAdr - fGttRange.beg > fGttRange.size
+		|| buffer->size > fGttRange.size - (buffer->gpuPhysAdr - fGttRange.beg)
+		|| (buffer->gpuPhysAdr & (B_PAGE_SIZE - 1)) != 0
+		|| (buffer->size & (B_PAGE_SIZE - 1)) != 0)
+		return B_BAD_VALUE;
+	const uint64 firstIndex = (buffer->gpuPhysAdr - fGttRange.beg) / B_PAGE_SIZE;
+	const uint64 pageCount = buffer->size / B_PAGE_SIZE;
+	for (uint64 page = 0; page < pageCount; page++)
+		((Pte*)fGartPageTable.adr)[firstIndex + page] = Pte{.val = 0};
 	GartFlushTlb();
 	return B_OK;
 }
