@@ -265,18 +265,23 @@ status_t AddressSpace::Map(BReference<BufferObject> buffer, uint64 mapAdr, uint6
 
 status_t AddressSpace::Unmap(BReference<BufferObject> buffer, uint64 mapAdr, uint64 offset, uint64 size)
 {
-	(void)buffer;
-	(void)offset;
 	auto it = fMappings.find(mapAdr);
-	if (it == fMappings.end()) return B_ERROR;
+	if (it == fMappings.end())
+		return B_BAD_VALUE;
 	Mapping &mapping = it->second;
 
-	if (size != mapping.size) {
-		printf("[!] AddressSpace::Unmap: size != mapping.size\n");
-	}
+	// Refuse to tear down a mapping when the caller's BO/range does not match
+	// the one recorded at Map() time.
+	if (!buffer.IsSet() || mapping.buffer.Get() != buffer.Get()
+		|| mapping.offset != offset || size == 0
+		|| size > UINT64_MAX - (B_PAGE_SIZE - 1)
+		|| RoundUp<uint64>(size, B_PAGE_SIZE) != mapping.size)
+		return B_BAD_VALUE;
 
 	for (uint64 ofs = 0; ofs < mapping.size; ofs += B_PAGE_SIZE) {
-		UnmapInt(mapAdr + ofs);
+		status_t status = UnmapInt(mapAdr + ofs);
+		if (status != B_OK)
+			return status;
 	}
 
 	fMappings.erase(it);
