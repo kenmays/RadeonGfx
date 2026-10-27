@@ -52,6 +52,7 @@ struct BufferObject: public FdObject {
 	uint64 gpuPhysAdr;
 	uint64 size;
 	uint64 offset; // relative to area
+	bool gartMapped = false;
 	AreaDeleter area;
 
 	Metadata metadata{};
