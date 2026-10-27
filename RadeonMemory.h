@@ -65,7 +65,7 @@ struct MappedBuffer {
 	BReference<BufferObject> buf;
 	void *adr;
 	MappedBuffer(): adr(NULL) {}
-	MappedBuffer(BReference<BufferObject> buffer) {SetTo(buffer);}
+	MappedBuffer(BReference<BufferObject> buffer): adr(NULL) {SetTo(buffer);}
 	status_t SetTo(BReference<BufferObject> buffer);
 };
 
