@@ -164,49 +164,99 @@ BReference<BufferObject> AddressSpace::Lookup(uint64 mapAdr, uint64 &offset)
 
 status_t AddressSpace::Map(BReference<BufferObject> buffer, uint64 mapAdr, uint64 offset, uint64 size)
 {
+	if (!buffer.IsSet() || size == 0)
+		return B_BAD_VALUE;
+	if ((mapAdr & (B_PAGE_SIZE - 1)) != 0 || (offset & (B_PAGE_SIZE - 1)) != 0)
+		return B_BAD_VALUE;
+
+	// Round only after checking for overflow. All PTE operations below work in
+	// whole pages, so offset and the requested range must fit the BO.
+	if (size > UINT64_MAX - (B_PAGE_SIZE - 1))
+		return B_BAD_VALUE;
 	size = RoundUp<uint64>(size, B_PAGE_SIZE);
-	uint32 flags = R600_PTE_READABLE | R600_PTE_WRITEABLE;
-	if (buffer->domain == boDomainGtt) {
-		flags |= R600_PTE_SYSTEM | R600_PTE_SNOOPED;
-		Pte *gartPageTableAdr = (Pte*)gDevice.MemMgr().Switch()->fGartPageTable.adr;
-		for (uint64 ofs = 0; ofs < size; ofs += B_PAGE_SIZE) {
-			uint64 gttAdr = buffer->gpuPhysAdr + ofs - gDevice.MemMgr().Switch()->fGttRange.beg;
-			Pte gttPte = gartPageTableAdr[gttAdr/B_PAGE_SIZE];
-			MapInt(mapAdr + ofs, gttPte.ppn*B_PAGE_SIZE, flags);
-		}
-	} else {
-		uint64 virtBeg = mapAdr/B_PAGE_SIZE;
-		uint64 virtEnd = (mapAdr + size)/B_PAGE_SIZE;
-		uint64 physAdr = buffer->gpuPhysAdr;
+	if (offset > buffer->size || size > buffer->size - offset)
+		return B_BAD_VALUE;
+	if (mapAdr > UINT64_MAX - size)
+		return B_BAD_VALUE;
 
-		uint64 fragFlags = R600_PTE_FRAG_64KB;
-		uint64 fragAlign = 0x10;
-		uint64 fragBeg = RoundUp(virtBeg, fragAlign);
-		uint64 fragEnd = RoundDown(virtEnd, fragAlign);
-
-		if (fragBeg >= fragEnd) {
-			MapIntRange(mapAdr, buffer->gpuPhysAdr, size, flags);
-		} else {
-			uint64 count;
-
-			if (virtBeg != fragBeg) {
-				count = (fragBeg - virtBeg);
-				MapIntRange(virtBeg * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags);
-				physAdr += B_PAGE_SIZE * count;
-			}
-
-			count = (fragEnd - fragBeg);
-			MapIntRange(fragBeg * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags | fragFlags);
-
-			if (fragEnd != virtEnd) {
-				physAdr += B_PAGE_SIZE * count;
-				count = (virtEnd - fragEnd);
-				MapIntRange(fragEnd * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags);
-			}
-		}
+	const uint64 mapEnd = mapAdr + size;
+	auto next = fMappings.lower_bound(mapAdr);
+	if (next != fMappings.end() && next->first < mapEnd)
+		return B_BUSY;
+	if (next != fMappings.begin()) {
+		auto previous = std::prev(next);
+		if (previous->first + previous->second.size > mapAdr)
+			return B_BUSY;
 	}
 
-	// TODO: check mapping intersections
+	auto memMgr = gDevice.MemMgr().Switch();
+	if (!memMgr)
+		return B_NO_INIT;
+
+	uint32 flags = R600_PTE_READABLE | R600_PTE_WRITEABLE;
+	status_t status = B_OK;
+	uint64 physAdr = buffer->gpuPhysAdr + offset;
+	if (physAdr < buffer->gpuPhysAdr)
+		return B_BAD_VALUE;
+
+	if (buffer->domain == boDomainGtt) {
+		flags |= R600_PTE_SYSTEM | R600_PTE_SNOOPED;
+		if (memMgr->fGartPageTable.adr == NULL)
+			return B_NO_INIT;
+
+		for (uint64 ofs = 0; ofs < size; ofs += B_PAGE_SIZE) {
+			const uint64 gttAdr = physAdr + ofs;
+			if (gttAdr < memMgr->fGttRange.beg
+				|| gttAdr - memMgr->fGttRange.beg >= memMgr->fGttRange.size)
+				return B_BAD_VALUE;
+
+			const uint64 gttIndex = (gttAdr - memMgr->fGttRange.beg) / B_PAGE_SIZE;
+			const Pte gttPte = ((Pte*)memMgr->fGartPageTable.adr)[gttIndex];
+			if (!(gttPte.flags & R600_PTE_VALID)) {
+				status = B_BAD_ADDRESS;
+				break;
+			}
+			status = MapInt(mapAdr + ofs, gttPte.ppn * B_PAGE_SIZE, flags);
+			if (status != B_OK)
+				break;
+		}
+	} else if (buffer->domain == boDomainVram || buffer->domain == boDomainVramMappable) {
+		const uint64 virtBeg = mapAdr / B_PAGE_SIZE;
+		const uint64 virtEnd = mapEnd / B_PAGE_SIZE;
+		const uint64 fragAlign = 0x10; // 64 KiB, in 4 KiB pages
+		const uint64 fragBeg = RoundUp(virtBeg, fragAlign);
+		const uint64 fragEnd = RoundDown(virtEnd, fragAlign);
+
+		if (fragBeg >= fragEnd) {
+			status = MapIntRange(mapAdr, physAdr, size, flags);
+		} else {
+			uint64 count;
+			if (virtBeg != fragBeg) {
+				count = fragBeg - virtBeg;
+				status = MapIntRange(virtBeg * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags);
+				physAdr += B_PAGE_SIZE * count;
+			}
+			if (status == B_OK) {
+				count = fragEnd - fragBeg;
+				status = MapIntRange(fragBeg * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags | R600_PTE_FRAG_64KB);
+				physAdr += B_PAGE_SIZE * count;
+			}
+			if (status == B_OK && fragEnd != virtEnd) {
+				count = virtEnd - fragEnd;
+				status = MapIntRange(fragEnd * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags);
+			}
+		}
+	} else {
+		return B_BAD_VALUE;
+	}
+
+	if (status != B_OK) {
+		// Roll back any PTEs installed before the failed page/table operation.
+		for (uint64 ofs = 0; ofs < size; ofs += B_PAGE_SIZE)
+			UnmapInt(mapAdr + ofs);
+		return status;
+	}
+
 	fMappings.emplace(mapAdr, Mapping{buffer, offset, size});
 	return B_OK;
 }
