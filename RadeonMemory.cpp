@@ -9,6 +9,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
+#include <iterator>
 
 
 static void WriteBuffer(BufferObject& buf)
@@ -21,8 +23,9 @@ BufferObject::~BufferObject()
 	//printf("-BufferObject()\n");
 	//printf("  "); WriteBuffer(*this); printf("\n");
 	if (auto memMgr = gDevice.MemMgr().Switch()) {
-		if (domain == boDomainGtt) {
+		if (domain == boDomainGtt && gartMapped) {
 			memMgr->GartUnmap(this);
+			gartMapped = false;
 		}
 		ExternalAllocator& pool = memMgr->fDomainPools[domain];
 		//printf("  pool: %p\n", &pool);
@@ -33,9 +36,17 @@ BufferObject::~BufferObject()
 
 status_t MappedBuffer::SetTo(BReference<BufferObject> buffer)
 {
+	adr = NULL;
 	buf = buffer;
-	if (!buf.IsSet()) {adr = NULL; return B_OK;}
-	return gDevice.MemMgr().Switch()->CpuMap(adr, buf, 0, buf->size);
+	if (!buf.IsSet())
+		return B_OK;
+	auto memMgr = gDevice.MemMgr().Switch();
+	if (memMgr == NULL)
+		return B_NO_INIT;
+	status_t status = memMgr->CpuMap(adr, buf, 0, buf->size);
+	if (status != B_OK)
+		adr = NULL;
+	return status;
 }
 
 
@@ -44,8 +55,13 @@ status_t MappedBuffer::SetTo(BReference<BufferObject> buffer)
 AddressSpace::AddressSpace():
 	fVmId(-1), fVmIdRefCnt(0)
 {
-	fPageDirBuf.SetTo(gDevice.MemMgr().Switch()->Alloc(boDomainVramMappable, pageDirLen*sizeof(Pte)));
-	if (!fPageDirBuf.buf.IsSet()) {
+	auto memMgr = gDevice.MemMgr().Switch();
+	if (memMgr == NULL) {
+		printf("[!] +AddressSpace: memory manager unavailable\n");
+		return;
+	}
+	fPageDirBuf.SetTo(memMgr->Alloc(boDomainVramMappable, pageDirLen*sizeof(Pte)));
+	if (!fPageDirBuf.buf.IsSet() || fPageDirBuf.adr == NULL) {
 		printf("[!] +AddressSpace: out of mappable VRAM memory\n");
 		return;
 	}
@@ -59,6 +75,11 @@ AddressSpace::~AddressSpace()
 
 Pte *AddressSpace::LookupPte(uint64 virtAdr, bool alloc)
 {
+	if (!fPageDirBuf.buf.IsSet() || fPageDirBuf.adr == NULL)
+		return NULL;
+	auto memMgr = gDevice.MemMgr().Switch();
+	if (memMgr == NULL)
+		return NULL;
 	uint64 pteIdx = virtAdr / B_PAGE_SIZE % pageTableLen;
 	uint64 pdeIdx = virtAdr / B_PAGE_SIZE / pageTableLen;
 	if (pdeIdx >= pageDirLen) return NULL;
@@ -66,9 +87,12 @@ Pte *AddressSpace::LookupPte(uint64 virtAdr, bool alloc)
 	Pte pdeVal = *pde;
 	if (!(pdeVal.flags & R600_PTE_VALID)) {
 		if (!alloc) return NULL;
-		fPageTableBufs[pdeIdx].SetTo(gDevice.MemMgr().Switch()->Alloc(boDomainVramMappable, pageTableLen*sizeof(Pte)));
-		if (!fPageTableBufs[pdeIdx].buf.IsSet()) {
-			printf("[!] AddressSpace::LookupPte: out of mappable VRAM memory\n");
+		status_t status = fPageTableBufs[pdeIdx].SetTo(
+			memMgr->Alloc(boDomainVramMappable, pageTableLen * sizeof(Pte)));
+		if (status != B_OK || !fPageTableBufs[pdeIdx].buf.IsSet()
+			|| fPageTableBufs[pdeIdx].adr == NULL) {
+			printf("[!] AddressSpace::LookupPte: unable to map page table memory (%" B_PRIi32 ")\n",
+				status);
 			return NULL;
 		}
 		memset(fPageTableBufs[pdeIdx].adr, 0, fPageTableBufs[pdeIdx].buf->size);
@@ -131,10 +155,19 @@ static void WritePteFlags(uint32 flags) {
 void AddressSpace::DumpPageTable()
 {
 	printf("page table\n");
+	if (!fPageDirBuf.buf.IsSet() || fPageDirBuf.adr == NULL) {
+		printf("  unavailable: page directory is not mapped\n");
+		return;
+	}
 	for (uint64 pdeIdx = 0; pdeIdx < pageDirLen; pdeIdx ++) {
 		Pte *pde = (Pte*)fPageDirBuf.adr + pdeIdx;
 		Pte pdeVal = *pde;
 		if (pdeVal.flags & R600_PTE_VALID) {
+			if (!fPageTableBufs[pdeIdx].buf.IsSet() || fPageTableBufs[pdeIdx].adr == NULL) {
+				printf("  %#" B_PRIx64 ": valid PDE has no mapped page table\n",
+					pdeIdx * pageTableLen * B_PAGE_SIZE);
+				continue;
+			}
 			printf("  %#" B_PRIx64 ": %#" B_PRIx64 ", %#" B_PRIx64 ", ", pdeIdx * pageTableLen * B_PAGE_SIZE, pdeVal.ppn * B_PAGE_SIZE, fPageTableBufs[pdeIdx].buf->gpuPhysAdr);
 			WritePteFlags(pdeVal.flags); printf("\n");
 
@@ -164,67 +197,146 @@ BReference<BufferObject> AddressSpace::Lookup(uint64 mapAdr, uint64 &offset)
 
 status_t AddressSpace::Map(BReference<BufferObject> buffer, uint64 mapAdr, uint64 offset, uint64 size)
 {
+	if (!buffer.IsSet() || size == 0)
+		return B_BAD_VALUE;
+	if ((mapAdr & (B_PAGE_SIZE - 1)) != 0 || (offset & (B_PAGE_SIZE - 1)) != 0)
+		return B_BAD_VALUE;
+
+	// Round only after checking for overflow. All PTE operations below work in
+	// whole pages, so offset and the requested range must fit the BO.
+	if (size > UINT64_MAX - (B_PAGE_SIZE - 1))
+		return B_BAD_VALUE;
 	size = RoundUp<uint64>(size, B_PAGE_SIZE);
-	uint32 flags = R600_PTE_READABLE | R600_PTE_WRITEABLE;
-	if (buffer->domain == boDomainGtt) {
-		flags |= R600_PTE_SYSTEM | R600_PTE_SNOOPED;
-		Pte *gartPageTableAdr = (Pte*)gDevice.MemMgr().Switch()->fGartPageTable.adr;
-		for (uint64 ofs = 0; ofs < size; ofs += B_PAGE_SIZE) {
-			uint64 gttAdr = buffer->gpuPhysAdr + ofs - gDevice.MemMgr().Switch()->fGttRange.beg;
-			Pte gttPte = gartPageTableAdr[gttAdr/B_PAGE_SIZE];
-			MapInt(mapAdr + ofs, gttPte.ppn*B_PAGE_SIZE, flags);
-		}
-	} else {
-		uint64 virtBeg = mapAdr/B_PAGE_SIZE;
-		uint64 virtEnd = (mapAdr + size)/B_PAGE_SIZE;
-		uint64 physAdr = buffer->gpuPhysAdr;
+	if (offset > buffer->size || size > buffer->size - offset)
+		return B_BAD_VALUE;
+	if (mapAdr > UINT64_MAX - size)
+		return B_BAD_VALUE;
 
-		uint64 fragFlags = R600_PTE_FRAG_64KB;
-		uint64 fragAlign = 0x10;
-		uint64 fragBeg = RoundUp(virtBeg, fragAlign);
-		uint64 fragEnd = RoundDown(virtEnd, fragAlign);
+	const uint64 mapEnd = mapAdr + size;
+	// LookupPte() currently implements a two-level page table only: 4096 PDEs
+	// times 512 PTEs times 4 KiB. Reject addresses outside that implemented
+	// 8 GiB GPU virtual-address window rather than walking an unrepresentable VA.
+	const uint64 gpuVaLimit = (uint64)pageDirLen * pageTableLen * B_PAGE_SIZE;
+	if (mapEnd > gpuVaLimit)
+		return B_BAD_VALUE;
 
-		if (fragBeg >= fragEnd) {
-			MapIntRange(mapAdr, buffer->gpuPhysAdr, size, flags);
-		} else {
-			uint64 count;
-
-			if (virtBeg != fragBeg) {
-				count = (fragBeg - virtBeg);
-				MapIntRange(virtBeg * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags);
-				physAdr += B_PAGE_SIZE * count;
-			}
-
-			count = (fragEnd - fragBeg);
-			MapIntRange(fragBeg * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags | fragFlags);
-
-			if (fragEnd != virtEnd) {
-				physAdr += B_PAGE_SIZE * count;
-				count = (virtEnd - fragEnd);
-				MapIntRange(fragEnd * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags);
-			}
-		}
+	auto next = fMappings.lower_bound(mapAdr);
+	if (next != fMappings.end() && next->first < mapEnd)
+		return B_BUSY;
+	if (next != fMappings.begin()) {
+		auto previous = std::prev(next);
+		if (previous->first + previous->second.size > mapAdr)
+			return B_BUSY;
 	}
 
-	// TODO: check mapping intersections
+	auto memMgr = gDevice.MemMgr().Switch();
+	if (!memMgr)
+		return B_NO_INIT;
+
+	// Reject stale/orphan PTEs too: the mapping index alone is not enough
+	// to prove that the hardware page-table range is empty.
+	for (uint64 ofs = 0; ofs < size; ofs += B_PAGE_SIZE) {
+		Pte* existing = LookupPte(mapAdr + ofs, false);
+		if (existing != NULL && (existing->flags & R600_PTE_VALID))
+			return B_BUSY;
+	}
+
+	uint32 flags = R600_PTE_READABLE | R600_PTE_WRITEABLE;
+	status_t status = B_OK;
+	uint64 physAdr = buffer->gpuPhysAdr + offset;
+	if (physAdr < buffer->gpuPhysAdr || physAdr > UINT64_MAX - size)
+		return B_BAD_VALUE;
+
+	if (buffer->domain == boDomainGtt) {
+		flags |= R600_PTE_SYSTEM | R600_PTE_SNOOPED;
+		if (memMgr->fGartPageTable.adr == NULL)
+			return B_NO_INIT;
+
+		for (uint64 ofs = 0; ofs < size; ofs += B_PAGE_SIZE) {
+			const uint64 gttAdr = physAdr + ofs;
+			if (gttAdr < memMgr->fGttRange.beg
+				|| gttAdr - memMgr->fGttRange.beg >= memMgr->fGttRange.size) {
+				status = B_BAD_VALUE;
+				break;
+			}
+
+			const uint64 gttIndex = (gttAdr - memMgr->fGttRange.beg) / B_PAGE_SIZE;
+			const Pte gttPte = ((Pte*)memMgr->fGartPageTable.adr)[gttIndex];
+			if (!(gttPte.flags & R600_PTE_VALID)) {
+				status = B_BAD_ADDRESS;
+				break;
+			}
+			status = MapInt(mapAdr + ofs, gttPte.ppn * B_PAGE_SIZE, flags);
+			if (status != B_OK)
+				break;
+		}
+	} else if (buffer->domain == boDomainVram || buffer->domain == boDomainVramMappable) {
+		const uint64 virtBeg = mapAdr / B_PAGE_SIZE;
+		const uint64 virtEnd = mapEnd / B_PAGE_SIZE;
+		const uint64 fragAlign = 0x10; // 64 KiB, in 4 KiB pages
+		const uint64 fragBeg = RoundUp(virtBeg, fragAlign);
+		const uint64 fragEnd = RoundDown(virtEnd, fragAlign);
+
+		if (fragBeg >= fragEnd) {
+			status = MapIntRange(mapAdr, physAdr, size, flags);
+		} else {
+			uint64 count;
+			if (virtBeg != fragBeg) {
+				count = fragBeg - virtBeg;
+				status = MapIntRange(virtBeg * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags);
+				physAdr += B_PAGE_SIZE * count;
+			}
+			if (status == B_OK) {
+				count = fragEnd - fragBeg;
+				status = MapIntRange(fragBeg * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags | R600_PTE_FRAG_64KB);
+				physAdr += B_PAGE_SIZE * count;
+			}
+			if (status == B_OK && fragEnd != virtEnd) {
+				count = virtEnd - fragEnd;
+				status = MapIntRange(fragEnd * B_PAGE_SIZE, physAdr, B_PAGE_SIZE * count, flags);
+			}
+		}
+	} else {
+		return B_BAD_VALUE;
+	}
+
+	if (status != B_OK) {
+		// Roll back any PTEs installed before the failed page/table operation.
+		for (uint64 ofs = 0; ofs < size; ofs += B_PAGE_SIZE)
+			UnmapInt(mapAdr + ofs);
+		return status;
+	}
+
 	fMappings.emplace(mapAdr, Mapping{buffer, offset, size});
 	return B_OK;
 }
 
 status_t AddressSpace::Unmap(BReference<BufferObject> buffer, uint64 mapAdr, uint64 offset, uint64 size)
 {
-	(void)buffer;
-	(void)offset;
 	auto it = fMappings.find(mapAdr);
-	if (it == fMappings.end()) return B_ERROR;
+	if (it == fMappings.end())
+		return B_BAD_VALUE;
 	Mapping &mapping = it->second;
 
-	if (size != mapping.size) {
-		printf("[!] AddressSpace::Unmap: size != mapping.size\n");
-	}
+	// Refuse to tear down a mapping when the caller's BO/range does not match
+	// the one recorded at Map() time.
+	if (!buffer.IsSet() || mapping.buffer.Get() != buffer.Get()
+		|| mapping.offset != offset || size == 0
+		|| size > UINT64_MAX - (B_PAGE_SIZE - 1)
+		|| RoundUp<uint64>(size, B_PAGE_SIZE) != mapping.size)
+		return B_BAD_VALUE;
 
+	// Preflight the complete range before clearing any PTE. This avoids
+	// returning with a half-unmapped range and a still-live mapping record.
 	for (uint64 ofs = 0; ofs < mapping.size; ofs += B_PAGE_SIZE) {
-		UnmapInt(mapAdr + ofs);
+		Pte* pte = LookupPte(mapAdr + ofs, false);
+		if (pte == NULL || !(pte->flags & R600_PTE_VALID))
+			return B_BAD_ADDRESS;
+	}
+	for (uint64 ofs = 0; ofs < mapping.size; ofs += B_PAGE_SIZE) {
+		status_t status = UnmapInt(mapAdr + ofs);
+		if (status != B_OK)
+			return status;
 	}
 
 	fMappings.erase(it);
@@ -278,10 +390,14 @@ status_t MemoryManager::Init()
 	CheckRet(gDevice.Displays().Switch()->RegisterFramebuffers());
 
 	MappedBuffer dummyPage(Alloc(boDomainVramMappable, B_PAGE_SIZE));
+	if (!dummyPage.buf.IsSet() || dummyPage.adr == NULL)
+		return B_NO_MEMORY;
 	memset(dummyPage.adr, 0, dummyPage.buf->size);
 	fDummyPage = dummyPage.buf;
 
 	MappedBuffer vramScratch(Alloc(boDomainVramMappable, B_PAGE_SIZE));
+	if (!vramScratch.buf.IsSet() || vramScratch.adr == NULL)
+		return B_NO_MEMORY;
 	memset(vramScratch.adr, 0, vramScratch.buf->size);
 	fVramScratch = vramScratch.buf;
 
@@ -292,9 +408,16 @@ status_t MemoryManager::Init()
 
 BReference<BufferObject> MemoryManager::Alloc(MemoryDomain domain, uint64 size, uint64 alignment, uint32 flags, area_id area, uint64 offset)
 {
-	(void)alignment;
 	(void)flags;
-	size = (size + B_PAGE_SIZE - 1) / B_PAGE_SIZE * B_PAGE_SIZE;
+	if (domain < boDomainVram || domain > boDomainGtt || size == 0
+		|| alignment == 0 || (alignment & (alignment - 1)) != 0
+		|| size > UINT64_MAX - (B_PAGE_SIZE - 1))
+		return NULL;
+	// The allocator currently guarantees page alignment only. Do not silently
+	// promise a stronger alignment that it cannot provide.
+	if (alignment > B_PAGE_SIZE)
+		return NULL;
+	size = ((size + B_PAGE_SIZE - 1) / B_PAGE_SIZE) * B_PAGE_SIZE;
 	ExternalAllocator& pool = fDomainPools[domain];
 	//printf("  pool: %p\n", &pool);
 	uint64 gpuPhysAdr;
@@ -315,10 +438,12 @@ BReference<BufferObject> MemoryManager::Alloc(MemoryDomain domain, uint64 size, 
 				buffer->area.Detach();
 				return NULL;
 			}
+			buffer->gartMapped = true;
 		} else {
 			buffer->area.SetTo(create_area("GPU GTT", &virtAdr, B_ANY_ADDRESS, size, B_FULL_LOCK /*B_CONTIGUOUS*/, B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA));
 			if (!buffer->area.IsSet()) return NULL;
 			if (GartMap(buffer) < B_OK) return NULL;
+			buffer->gartMapped = true;
 		}
 	}
 
@@ -328,9 +453,12 @@ BReference<BufferObject> MemoryManager::Alloc(MemoryDomain domain, uint64 size, 
 
 BReference<BufferObject> MemoryManager::AllocAt(uint64 gpuAdr, uint64 size, uint64 alignment, uint32 flags)
 {
-	(void)alignment;
 	(void)flags;
-	size = (size + B_PAGE_SIZE - 1) / B_PAGE_SIZE * B_PAGE_SIZE;
+	if (size == 0 || alignment == 0 || (alignment & (alignment - 1)) != 0
+		|| alignment > B_PAGE_SIZE || size > UINT64_MAX - (B_PAGE_SIZE - 1)
+		|| (gpuAdr & (B_PAGE_SIZE - 1)) != 0)
+		return NULL;
+	size = ((size + B_PAGE_SIZE - 1) / B_PAGE_SIZE) * B_PAGE_SIZE;
 	MemoryDomain domain = boDomainVramMappable;
 	ExternalAllocator& pool = fDomainPools[domain];
 	if (!pool.AllocAt(gpuAdr, size)) return NULL;
@@ -344,16 +472,26 @@ BReference<BufferObject> MemoryManager::AllocAt(uint64 gpuAdr, uint64 size, uint
 
 status_t MemoryManager::CpuMap(void*& ptr, BReference<BufferObject> buffer, uint64 offset, uint64 size)
 {
-	if (!buffer.IsSet()) return B_BAD_VALUE;
-	if (!(offset + size <= buffer->size)) return B_BAD_VALUE;
+	if (!buffer.IsSet() || size == 0) return B_BAD_VALUE;
+	if (offset > buffer->size || size > buffer->size - offset)
+		return B_BAD_VALUE;
 	switch (buffer->domain) {
 		case boDomainVramMappable: {
+			if (buffer->gpuPhysAdr < fVramRange.beg
+				|| buffer->gpuPhysAdr - fVramRange.beg > fVramRange.size
+				|| buffer->size > fVramRange.size - (buffer->gpuPhysAdr - fVramRange.beg)
+				|| gDevice.SharedInfo() == NULL
+				|| gDevice.SharedInfo()->frame_buffer == NULL)
+				return B_BAD_ADDRESS;
 			ptr = gDevice.SharedInfo()->frame_buffer + (buffer->gpuPhysAdr - fVramRange.beg) + offset;
 			return B_OK;
 		}
 		case boDomainGtt: {
 			area_info areaInfo;
 			CheckRet(get_area_info(buffer->area.Get(), &areaInfo));
+			if (buffer->offset > areaInfo.size || offset > areaInfo.size - buffer->offset
+				|| size > areaInfo.size - buffer->offset - offset)
+				return B_BAD_VALUE;
 			ptr = (uint8*)areaInfo.address + buffer->offset + offset;
 			return B_OK;
 		}
@@ -382,10 +520,30 @@ void MemoryManager::FreeVmid(int32 vmid)
 
 status_t MemoryManager::AllocWriteback(uint64 &gpuAdr, void *&cpuAdr, uint64 size)
 {
-	if (!fWritebackPool.Alloc(gpuAdr, size)) {
+	gpuAdr = 0;
+	cpuAdr = NULL;
+	if (size == 0 || !fWritebackBuf.buf.IsSet() || fWritebackBuf.adr == NULL)
+		return B_NO_INIT;
+	if (size > fWritebackBuf.buf->size)
+		return B_BAD_VALUE;
+	if (!fWritebackPool.Alloc(gpuAdr, size))
 		return B_NO_MEMORY;
+
+	// The writeback pool must be a subrange of the backing buffer. Validate
+	// before forming the CPU pointer so a corrupt allocator result cannot
+	// produce an underflowed offset or an out-of-bounds pointer.
+	if (gpuAdr < fWritebackBuf.buf->gpuPhysAdr) {
+		fWritebackPool.Free(gpuAdr);
+		gpuAdr = 0;
+		return B_BAD_ADDRESS;
 	}
-	cpuAdr = (void*)((addr_t)(gpuAdr - fWritebackBuf.buf->gpuPhysAdr) + (addr_t)fWritebackBuf.adr);
+	const uint64 offset = gpuAdr - fWritebackBuf.buf->gpuPhysAdr;
+	if (offset > fWritebackBuf.buf->size || size > fWritebackBuf.buf->size - offset) {
+		fWritebackPool.Free(gpuAdr);
+		gpuAdr = 0;
+		return B_BAD_ADDRESS;
+	}
+	cpuAdr = (void*)((addr_t)offset + (addr_t)fWritebackBuf.adr);
 	return B_OK;
 }
 
@@ -411,6 +569,10 @@ status_t MemoryManager::InitGart()
 	uint32 radeon_vm_block_size = 9;
 
 	fGartPageTable.SetTo(Alloc(boDomainVramMappable, fGttRange.size / B_PAGE_SIZE * sizeof(uint64)));
+	if (!fGartPageTable.buf.IsSet() || fGartPageTable.adr == NULL)
+		return B_NO_MEMORY;
+	if (!fDummyPage.IsSet() || !fVramScratch.IsSet())
+		return B_NO_INIT;
 	memset(fGartPageTable.adr, 0, fGartPageTable.buf->size);
 
 	/* Setup TLB control */
@@ -508,6 +670,15 @@ status_t MemoryManager::InitGart()
 	fGartEnabled = true;
 
 	fWritebackBuf.SetTo(Alloc(boDomainGtt, 4096));
+	if (!fWritebackBuf.buf.IsSet() || fWritebackBuf.adr == NULL) {
+		// Keep the driver in a fail-closed state if writeback cannot be
+		// established; context 0 must not remain enabled without full setup.
+		WriteReg4AmdGpu(mmVM_CONTEXT0_CNTL, 0);
+		WriteReg4AmdGpu(mmVM_CONTEXT1_CNTL, 0);
+		WriteReg4AmdGpu(mmVM_INVALIDATE_REQUEST, 1);
+		fGartEnabled = false;
+		return B_NO_MEMORY;
+	}
 	fWritebackPool.Register(fWritebackBuf.buf->gpuPhysAdr, fWritebackBuf.buf->size);
 
 	return B_OK;
@@ -515,19 +686,47 @@ status_t MemoryManager::InitGart()
 
 status_t MemoryManager::GartMap(BReference<BufferObject> buffer)
 {
-	// printf("GartMap()\n");
-	uint8 *cpuVirtAdr;
+	if (!buffer.IsSet() || buffer->domain != boDomainGtt || buffer->size == 0
+		|| fGartPageTable.adr == NULL || !fGartPageTable.buf.IsSet())
+		return B_NO_INIT;
+	if (buffer->gpuPhysAdr < fGttRange.beg
+		|| buffer->gpuPhysAdr - fGttRange.beg > fGttRange.size
+		|| buffer->size > fGttRange.size - (buffer->gpuPhysAdr - fGttRange.beg)
+		|| (buffer->gpuPhysAdr & (B_PAGE_SIZE - 1)) != 0
+		|| (buffer->size & (B_PAGE_SIZE - 1)) != 0)
+		return B_BAD_VALUE;
+
+	uint8 *cpuVirtAdr = NULL;
 	Pte *pageTableVirtAdr = (Pte*)fGartPageTable.adr;
-	CheckRet(gDevice.MemMgr().Switch()->CpuMap(*(void**)&cpuVirtAdr, buffer, 0, buffer->size));
-	for (uint64 offset = 0; offset < buffer->size; offset += B_PAGE_SIZE) {
-		uint64 cpuPhysAdr;
-		CheckRet(gPoke.GetPhysicalAddress(cpuPhysAdr, cpuVirtAdr + offset, B_PAGE_SIZE));
-		Pte pte{
+	if (pageTableVirtAdr == NULL)
+		return B_NO_INIT;
+	auto memMgr = gDevice.MemMgr().Switch();
+	if (memMgr == NULL)
+		return B_NO_INIT;
+	CheckRet(memMgr->CpuMap(*(void**)&cpuVirtAdr, buffer, 0, buffer->size));
+
+	const uint64 firstIndex = (buffer->gpuPhysAdr - fGttRange.beg) / B_PAGE_SIZE;
+	const uint64 pageCount = buffer->size / B_PAGE_SIZE;
+	// The GTT allocator should prevent overlap, but verify the entire PTE
+	// range before writing so stale entries cannot be silently overwritten.
+	for (uint64 page = 0; page < pageCount; page++) {
+		if (pageTableVirtAdr[firstIndex + page].flags & R600_PTE_VALID)
+			return B_BUSY;
+	}
+	for (uint64 page = 0; page < pageCount; page++) {
+		uint64 cpuPhysAdr = 0;
+		status_t status = gPoke.GetPhysicalAddress(cpuPhysAdr,
+			cpuVirtAdr + page * B_PAGE_SIZE, B_PAGE_SIZE);
+		if (status != B_OK) {
+			for (uint64 rollback = 0; rollback < page; rollback++)
+				pageTableVirtAdr[firstIndex + rollback] = Pte{.val = 0};
+			GartFlushTlb();
+			return status;
+		}
+		pageTableVirtAdr[firstIndex + page] = Pte{
 			.flags = R600_PTE_VALID | R600_PTE_SYSTEM | R600_PTE_READABLE | R600_PTE_WRITEABLE | R600_PTE_SNOOPED,
 			.ppn = cpuPhysAdr / B_PAGE_SIZE
 		};
-		pageTableVirtAdr[(buffer->gpuPhysAdr - fGttRange.beg + offset) / B_PAGE_SIZE] = pte;
-		// printf("  %#" B_PRIx64 ": %#" B_PRIx64 "\n", buffer->gpuPhysAdr - fGttRange.beg + offset, cpuPhysAdr);
 	}
 	GartFlushTlb();
 	return B_OK;
@@ -535,12 +734,25 @@ status_t MemoryManager::GartMap(BReference<BufferObject> buffer)
 
 status_t MemoryManager::GartUnmap(BufferObject *buffer)
 {
-	Pte *pageTableVirtAdr = (Pte*)fGartPageTable.adr;
-	for (uint64 offset = 0; offset < buffer->size; offset += B_PAGE_SIZE) {
-		pageTableVirtAdr[(buffer->gpuPhysAdr - fGttRange.beg + offset) / B_PAGE_SIZE] = Pte{.val = 0};
+	if (buffer == NULL || fGartPageTable.adr == NULL || !fGartPageTable.buf.IsSet())
+		return B_NO_INIT;
+	if (buffer->gpuPhysAdr < fGttRange.beg
+		|| buffer->gpuPhysAdr - fGttRange.beg > fGttRange.size
+		|| buffer->size > fGttRange.size - (buffer->gpuPhysAdr - fGttRange.beg)
+		|| (buffer->gpuPhysAdr & (B_PAGE_SIZE - 1)) != 0
+		|| (buffer->size & (B_PAGE_SIZE - 1)) != 0)
+		return B_BAD_VALUE;
+	const uint64 firstIndex = (buffer->gpuPhysAdr - fGttRange.beg) / B_PAGE_SIZE;
+	const uint64 pageCount = buffer->size / B_PAGE_SIZE;
+	Pte* pageTable = (Pte*)fGartPageTable.adr;
+	bool inconsistent = false;
+	for (uint64 page = 0; page < pageCount; page++) {
+		if (!(pageTable[firstIndex + page].flags & R600_PTE_VALID))
+			inconsistent = true;
+		pageTable[firstIndex + page] = Pte{.val = 0};
 	}
 	GartFlushTlb();
-	return B_OK;
+	return inconsistent ? B_BAD_ADDRESS : B_OK;
 }
 
 void MemoryManager::GartFlushTlb()

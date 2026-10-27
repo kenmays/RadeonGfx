@@ -438,12 +438,15 @@ const struct supported_device {
 	{0x131b, 8, 1, RADEON_KAVERI, CHIP_STD, "Radeon R5 Series"},
 	{0x131c, 8, 1, RADEON_KAVERI, CHIP_STD, "Radeon R7 Series"},
 	{0x131d, 8, 1, RADEON_KAVERI, CHIP_STD, "Radeon R6 Series"},
-	//  Bonaire DCE 8.2
-	{0x6640, 8, 2, RADEON_BONAIRE, CHIP_MOBILE, "Radeon R9 380"},
+	//  Bonaire DCE 8.2 (Sea Islands / GCN 2)
+	//  Keep PCI device IDs separate from marketing names: 0x6640/0x6641
+	//  are commonly identified as FirePro M6100 / Radeon HD 8930M.
+	{0x6640, 8, 2, RADEON_BONAIRE, CHIP_MOBILE, "FirePro M6100"},
 	{0x6641, 8, 2, RADEON_BONAIRE, CHIP_MOBILE, "Radeon HD 8930M"},
-	{0x6646, 8, 2, RADEON_BONAIRE, CHIP_MOBILE, "Radeon R9 380"},
-	{0x6647, 8, 2, RADEON_BONAIRE, CHIP_MOBILE, "Radeon R9 380"},
+	{0x6646, 8, 2, RADEON_BONAIRE, CHIP_MOBILE, "Radeon R9 M280X"},
+	{0x6647, 8, 2, RADEON_BONAIRE, CHIP_MOBILE, "Radeon R9 M270X/M280X"},
 	{0x6649, 8, 2, RADEON_BONAIRE, CHIP_STD, "FirePro W5100"},
+	{0x664d, 8, 2, RADEON_BONAIRE, CHIP_STD, "FirePro W5100 / MXRT-5600"},
 	{0x6650, 8, 2, RADEON_BONAIRE, CHIP_STD, "Radeon HD Bonaire"},
 	{0x6651, 8, 2, RADEON_BONAIRE, CHIP_STD, "Radeon HD Bonaire"},
 	{0x6658, 8, 2, RADEON_BONAIRE, CHIP_STD, "Radeon R7 200"},

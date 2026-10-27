@@ -52,6 +52,7 @@ struct BufferObject: public FdObject {
 	uint64 gpuPhysAdr;
 	uint64 size;
 	uint64 offset; // relative to area
+	bool gartMapped = false;
 	AreaDeleter area;
 
 	Metadata metadata{};
@@ -65,7 +66,7 @@ struct MappedBuffer {
 	BReference<BufferObject> buf;
 	void *adr;
 	MappedBuffer(): adr(NULL) {}
-	MappedBuffer(BReference<BufferObject> buffer) {SetTo(buffer);}
+	MappedBuffer(BReference<BufferObject> buffer): adr(NULL) {SetTo(buffer);}
 	status_t SetTo(BReference<BufferObject> buffer);
 };
 
@@ -107,7 +108,7 @@ private:
 public:
 	AddressSpace();
 	virtual ~AddressSpace();
-	uint64 PageDir() {return fPageDirBuf.buf->gpuPhysAdr;}
+	uint64 PageDir() { return fPageDirBuf.buf.IsSet() ? fPageDirBuf.buf->gpuPhysAdr : 0; }
 	void DumpPageTable();
 
 	BReference<BufferObject> Lookup(uint64 mapAdr, uint64 &offset);
