@@ -23,8 +23,9 @@ BufferObject::~BufferObject()
 	//printf("-BufferObject()\n");
 	//printf("  "); WriteBuffer(*this); printf("\n");
 	if (auto memMgr = gDevice.MemMgr().Switch()) {
-		if (domain == boDomainGtt) {
+		if (domain == boDomainGtt && gartMapped) {
 			memMgr->GartUnmap(this);
+			gartMapped = false;
 		}
 		ExternalAllocator& pool = memMgr->fDomainPools[domain];
 		//printf("  pool: %p\n", &pool);
@@ -415,10 +416,12 @@ BReference<BufferObject> MemoryManager::Alloc(MemoryDomain domain, uint64 size, 
 				buffer->area.Detach();
 				return NULL;
 			}
+			buffer->gartMapped = true;
 		} else {
 			buffer->area.SetTo(create_area("GPU GTT", &virtAdr, B_ANY_ADDRESS, size, B_FULL_LOCK /*B_CONTIGUOUS*/, B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA));
 			if (!buffer->area.IsSet()) return NULL;
 			if (GartMap(buffer) < B_OK) return NULL;
+			buffer->gartMapped = true;
 		}
 	}
 
