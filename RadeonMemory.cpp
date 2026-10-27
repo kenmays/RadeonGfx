@@ -526,6 +526,8 @@ status_t MemoryManager::InitGart()
 	fGartPageTable.SetTo(Alloc(boDomainVramMappable, fGttRange.size / B_PAGE_SIZE * sizeof(uint64)));
 	if (!fGartPageTable.buf.IsSet() || fGartPageTable.adr == NULL)
 		return B_NO_MEMORY;
+	if (!fDummyPage.IsSet() || !fVramScratch.IsSet())
+		return B_NO_INIT;
 	memset(fGartPageTable.adr, 0, fGartPageTable.buf->size);
 
 	/* Setup TLB control */
@@ -627,6 +629,7 @@ status_t MemoryManager::InitGart()
 		// Keep the driver in a fail-closed state if writeback cannot be
 		// established; context 0 must not remain enabled without full setup.
 		WriteReg4AmdGpu(mmVM_CONTEXT0_CNTL, 0);
+		WriteReg4AmdGpu(mmVM_CONTEXT1_CNTL, 0);
 		WriteReg4AmdGpu(mmVM_INVALIDATE_REQUEST, 1);
 		fGartEnabled = false;
 		return B_NO_MEMORY;
