@@ -498,10 +498,30 @@ void MemoryManager::FreeVmid(int32 vmid)
 
 status_t MemoryManager::AllocWriteback(uint64 &gpuAdr, void *&cpuAdr, uint64 size)
 {
-	if (!fWritebackPool.Alloc(gpuAdr, size)) {
+	gpuAdr = 0;
+	cpuAdr = NULL;
+	if (size == 0 || !fWritebackBuf.buf.IsSet() || fWritebackBuf.adr == NULL)
+		return B_NO_INIT;
+	if (size > fWritebackBuf.buf->size)
+		return B_BAD_VALUE;
+	if (!fWritebackPool.Alloc(gpuAdr, size))
 		return B_NO_MEMORY;
+
+	// The writeback pool must be a subrange of the backing buffer. Validate
+	// before forming the CPU pointer so a corrupt allocator result cannot
+	// produce an underflowed offset or an out-of-bounds pointer.
+	if (gpuAdr < fWritebackBuf.buf->gpuPhysAdr) {
+		fWritebackPool.Free(gpuAdr);
+		gpuAdr = 0;
+		return B_BAD_ADDRESS;
 	}
-	cpuAdr = (void*)((addr_t)(gpuAdr - fWritebackBuf.buf->gpuPhysAdr) + (addr_t)fWritebackBuf.adr);
+	const uint64 offset = gpuAdr - fWritebackBuf.buf->gpuPhysAdr;
+	if (offset > fWritebackBuf.buf->size || size > fWritebackBuf.buf->size - offset) {
+		fWritebackPool.Free(gpuAdr);
+		gpuAdr = 0;
+		return B_BAD_ADDRESS;
+	}
+	cpuAdr = (void*)((addr_t)offset + (addr_t)fWritebackBuf.adr);
 	return B_OK;
 }
 
