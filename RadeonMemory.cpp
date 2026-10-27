@@ -55,8 +55,13 @@ status_t MappedBuffer::SetTo(BReference<BufferObject> buffer)
 AddressSpace::AddressSpace():
 	fVmId(-1), fVmIdRefCnt(0)
 {
-	fPageDirBuf.SetTo(gDevice.MemMgr().Switch()->Alloc(boDomainVramMappable, pageDirLen*sizeof(Pte)));
-	if (!fPageDirBuf.buf.IsSet()) {
+	auto memMgr = gDevice.MemMgr().Switch();
+	if (memMgr == NULL) {
+		printf("[!] +AddressSpace: memory manager unavailable\n");
+		return;
+	}
+	fPageDirBuf.SetTo(memMgr->Alloc(boDomainVramMappable, pageDirLen*sizeof(Pte)));
+	if (!fPageDirBuf.buf.IsSet() || fPageDirBuf.adr == NULL) {
 		printf("[!] +AddressSpace: out of mappable VRAM memory\n");
 		return;
 	}
@@ -70,6 +75,11 @@ AddressSpace::~AddressSpace()
 
 Pte *AddressSpace::LookupPte(uint64 virtAdr, bool alloc)
 {
+	if (!fPageDirBuf.buf.IsSet() || fPageDirBuf.adr == NULL)
+		return NULL;
+	auto memMgr = gDevice.MemMgr().Switch();
+	if (memMgr == NULL)
+		return NULL;
 	uint64 pteIdx = virtAdr / B_PAGE_SIZE % pageTableLen;
 	uint64 pdeIdx = virtAdr / B_PAGE_SIZE / pageTableLen;
 	if (pdeIdx >= pageDirLen) return NULL;
@@ -77,7 +87,7 @@ Pte *AddressSpace::LookupPte(uint64 virtAdr, bool alloc)
 	Pte pdeVal = *pde;
 	if (!(pdeVal.flags & R600_PTE_VALID)) {
 		if (!alloc) return NULL;
-		fPageTableBufs[pdeIdx].SetTo(gDevice.MemMgr().Switch()->Alloc(boDomainVramMappable, pageTableLen*sizeof(Pte)));
+		fPageTableBufs[pdeIdx].SetTo(memMgr->Alloc(boDomainVramMappable, pageTableLen*sizeof(Pte)));
 		if (!fPageTableBufs[pdeIdx].buf.IsSet()) {
 			printf("[!] AddressSpace::LookupPte: out of mappable VRAM memory\n");
 			return NULL;
